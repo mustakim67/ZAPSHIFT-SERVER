@@ -1,4 +1,4 @@
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion,ObjectId } = require('mongodb');
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -31,11 +31,11 @@ async function run() {
     // POST route to add parcel
     app.post('/parcels', async (req, res) => {
       try {
-        console.log("Incoming parcel data:", req.body);  // Debug log
         const newParcel = req.body;
 
-        if (!newParcel || Object.keys(newParcel).length === 0) {
-          return res.status(400).send({ error: "Parcel data is missing" });
+        // Ensure creation_date is a valid Date
+        if (newParcel.creation_date) {
+          newParcel.creation_date = new Date(newParcel.creation_date);
         }
 
         const result = await parcelCollection.insertOne(newParcel);
@@ -47,29 +47,44 @@ async function run() {
     });
 
     // GET route to fetch parcels
-    // app.get('/parcels', async (req, res) => {
-    //   try {
-    //     const parcels = await parcelCollection.find().toArray();
-    //     res.send(parcels);
-    //   } catch (error) {
-    //     console.error("Error fetching parcels:", error);
-    //     res.status(500).send({ error: 'Failed to get parcels', message: error.message });
-    //   }
-    // });
-    // get parcels sorted by creation_date (latest first)
     app.get('/parcels', async (req, res) => {
-      const email = req.query.email;
       try {
-        const query = email ? { created_by: email } : {};
-        const parcels = await parcelCollection
-          .find(query)
-          .sort({ creation_date: -1 })  // Sort descending by creation_date (latest first)
-          .toArray();
+        const parcels = await parcelCollection.find().toArray();
         res.send(parcels);
       } catch (error) {
-        res.status(500).send({ error: 'Failed to fetch parcels' });
+        console.error("Error fetching parcels:", error);
+        res.status(500).send({ error: 'Failed to get parcels', message: error.message });
       }
     });
+
+    //Delete a particular parcel by user
+    app.delete('/parcels/:id', async (req, res) => {
+      const id = req.params.id;
+      try {
+        const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to delete parcel', message: error.message });
+      }
+    });
+
+    // get parcels sorted by creation_date (latest first) and with particular email
+    app.get('/myparcels', async (req, res) => {
+      const email = req.query.email;
+      console.log(email)
+      try {
+        const query = { created_by: email }; //Only fetch parcels created by this user
+        const myparcels = await parcelCollection.find(query).sort({ creation_date: -1 }).toArray();
+        res.send(myparcels);
+        console.log(myparcels)
+      }
+      catch (error) {
+        console.error("Error fetching parcels:", error);
+        res.status(500).send({ error: 'Failed to fetch parcels', message: error.message });
+      }
+    });
+
+
 
     // Test route
     app.get('/', (req, res) => {
