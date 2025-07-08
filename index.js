@@ -1,6 +1,11 @@
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const express = require('express');
 const cors = require('cors');
+
+//require stripe
+const Stripe = require('stripe');
+
+//require donenv and config
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -9,6 +14,9 @@ const app = express();
 // Middleware — must be before routes to parse JSON bodies
 app.use(cors());
 app.use(express.json());
+
+//stripe secret key
+const stripe = Stripe(process.env.PAYMENT_GATEWAY_KEY);
 
 // MongoDB connection URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.xqfap2z.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -100,8 +108,113 @@ async function run() {
       }
     });
 
+    // POST: Create Payment Intent
+    app.post('/create-payment-intent', async (req, res) => {
+      try {
+        const { amount } = req.body;
+
+        if (!amount || amount <= 0) {
+          return res.status(400).send({ error: 'Invalid amount' });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount * 100, // Stripe expects amount in cents
+          currency: 'usd',
+          payment_method_types: ['card'],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error('Error creating payment intent:', error);
+        res.status(500).send({
+          error: 'Failed to create payment intent',
+          message: error.message,
+        });
+      }
+    });
 
 
+    //update payment status and det payment history
+    const paymentsCollection = parcelDB.collection("paymentsCollection");
+
+    app.post('/payments', async (req, res) => {
+      try {
+        const {
+          parcelId,
+          amount,
+          transactionId,
+          email,
+          title,
+          payment_method,
+          payment_time
+        } = req.body;
+
+        if (!parcelId || !amount || !email || !transactionId || !title || !payment_method) {
+          return res.status(400).send({ error: 'Missing required payment info' });
+        }
+
+        const paymentDoc = {
+          parcelId: new ObjectId(parcelId),
+          amount,
+          transactionId,
+          email,
+          title,
+          payment_method, // ✅ New field
+          payment_time: payment_time ? new Date(payment_time) : new Date()
+        };
+
+        const insertResult = await paymentsCollection.insertOne(paymentDoc);
+
+        const updateResult = await parcelCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          { $set: { payment_status: 'paid' } }
+        );
+
+        res.send({
+          success: true,
+          message: 'Payment recorded and parcel updated',
+          insertedId: insertResult.insertedId,
+          updated: updateResult.modifiedCount
+        });
+      } catch (error) {
+        console.error('Error saving payment:', error);
+        res.status(500).send({
+          error: 'Failed to process payment',
+          message: error.message
+        });
+      }
+    });
+
+    //get payment history
+    app.get('/payments', async (req, res) => {
+      try {
+        const payments = await parcelDB.collection('payments')
+          .find()
+          .sort({ payment_time: -1 })
+          .toArray();
+        res.send(payments);
+      } catch (error) {
+        console.error('Error fetching payment history:', error);
+        res.status(500).send({ error: 'Failed to fetch payment history' });
+      }
+    });
+
+    //get payment history fro a particular user
+    app.get('/payments-history', async (req, res) => {
+      try {
+        const email = req.query.email;
+        const query = email ? { email } : {};
+        const payments = await paymentsCollection
+          .find(query)
+          .sort({ payment_time: -1 })
+          .toArray();
+        res.send(payments);
+      } catch (error) {
+        res.status(500).send({ error: 'Failed to fetch payment history', message: error.message });
+      }
+    });
     // Test route
     app.get('/', (req, res) => {
       res.send('Parcel Management Server is running');
