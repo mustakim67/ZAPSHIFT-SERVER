@@ -1,4 +1,4 @@
-const { MongoClient, ServerApiVersion,ObjectId } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -68,6 +68,22 @@ async function run() {
       }
     });
 
+    // GET parcel by ID
+    app.get('/parcels/:id', async (req, res) => {
+      const { id } = req.params;
+      try {
+        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!parcel) {
+          return res.status(404).send({ error: 'Parcel not found' });
+        }
+
+        res.send(parcel);
+      } catch (error) {
+        console.error('Error fetching parcel by ID:', error);
+        res.status(500).send({ error: 'Failed to get parcel', message: error.message });
+      }
+    });
     // get parcels sorted by creation_date (latest first) and with particular email
     app.get('/myparcels', async (req, res) => {
       const email = req.query.email;
