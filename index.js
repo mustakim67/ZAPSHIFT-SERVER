@@ -1,6 +1,8 @@
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const express = require('express');
 const cors = require('cors');
+const admin = require("firebase-admin");
+
 
 //require stripe
 const Stripe = require('stripe');
@@ -11,9 +13,16 @@ dotenv.config();
 
 const app = express();
 
-// Middleware — must be before routes to parse JSON bodies
+// Middleware
 app.use(cors());
 app.use(express.json());
+
+//firebase sdk
+const serviceAccount = require("./serviceAccountKey.json");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
 
 //stripe secret key
 const stripe = Stripe(process.env.PAYMENT_GATEWAY_KEY);
@@ -36,8 +45,28 @@ async function run() {
     const parcelDB = client.db("parcelDB");
     const parcelCollection = parcelDB.collection("parcels");
 
+
+    // Auth middleware
+    const verifyFBToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      console.log('authHeader', authHeader)
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).send({ message: 'Unauthorized Access' });
+      }
+
+      const token = authHeader.split(' ')[1];
+
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      } catch (error) {
+        return res.status(403).send({ message: 'Forbidden Access' });
+      }
+    };
+
     // POST route to add parcel
-    app.post('/parcels', async (req, res) => {
+    app.post('/parcels', verifyFBToken, async (req, res) => {
       try {
         const newParcel = req.body;
 
@@ -55,7 +84,7 @@ async function run() {
     });
 
     // GET route to fetch parcels
-    app.get('/parcels', async (req, res) => {
+    app.get('/parcels', verifyFBToken, async (req, res) => {
       try {
         const parcels = await parcelCollection.find().toArray();
         res.send(parcels);
@@ -66,7 +95,7 @@ async function run() {
     });
 
     //Delete a particular parcel by user
-    app.delete('/parcels/:id', async (req, res) => {
+    app.delete('/parcels/:id', verifyFBToken, async (req, res) => {
       const id = req.params.id;
       try {
         const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
@@ -77,7 +106,7 @@ async function run() {
     });
 
     // GET parcel by ID
-    app.get('/parcels/:id', async (req, res) => {
+    app.get('/parcels/:id', verifyFBToken, async (req, res) => {
       const { id } = req.params;
       try {
         const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
@@ -92,8 +121,12 @@ async function run() {
         res.status(500).send({ error: 'Failed to get parcel', message: error.message });
       }
     });
+
+
+
+
     // get parcels sorted by creation_date (latest first) and with particular email
-    app.get('/myparcels', async (req, res) => {
+    app.get('/myparcels', verifyFBToken, async (req, res) => {
       const email = req.query.email;
       console.log(email)
       try {
@@ -108,8 +141,64 @@ async function run() {
       }
     });
 
+
+
+
+    //Track a parcel by id
+    const tracklCollection = parcelDB.collection("trackedParcel");
+    app.post("/track", async (req, res) => {
+      const { tracking_id, parcel_id, status, message, updated_by = '' } = req.body;
+
+      const log = {
+        tracking_id,
+        parcel_id: parcel_id ? new ObjectId(parcel_id) : undefined,
+        status,
+        message,
+        time: new Date(),
+        updated_by,
+      };
+
+      const result = await trackingCollection.insertOne(log);
+      res.send({ success: true, insertedId: result.insertedId });
+    });
+
+
+
+
+
+    //Save user data to the datbase 
+    const userCollection = parcelDB.collection("users");
+
+    app.post('/users', async (req, res) => {
+      const email = req.body.email;
+      const userExist = await userCollection.findOne({ email });
+
+      if (userExist) {
+        // Update last_log_in for existing user
+        await userCollection.updateOne(
+          { email },
+          { $set: { last_log_in: new Date() } }
+        );
+        return res.status(200).json({ message: 'User exists. Login time updated.' });
+      }
+
+      // Create new user with last_log_in
+      const user = {
+        ...req.body,
+        created_at: new Date(),
+        last_log_in: new Date(),
+        role: req.body.role || 'user' // set default role if not given
+      };
+
+      const result = await userCollection.insertOne(user);
+      res.status(201).json({ message: 'New user created', result });
+    });
+
+
+
+
     // POST: Create Payment Intent
-    app.post('/create-payment-intent', async (req, res) => {
+    app.post('/create-payment-intent', verifyFBToken, async (req, res) => {
       try {
         const { amount } = req.body;
 
@@ -139,7 +228,7 @@ async function run() {
     //update payment status and det payment history
     const paymentsCollection = parcelDB.collection("paymentsCollection");
 
-    app.post('/payments', async (req, res) => {
+    app.post('/payments', verifyFBToken, async (req, res) => {
       try {
         const {
           parcelId,
@@ -161,7 +250,7 @@ async function run() {
           transactionId,
           email,
           title,
-          payment_method, // ✅ New field
+          payment_method,
           payment_time: payment_time ? new Date(payment_time) : new Date()
         };
 
@@ -188,7 +277,7 @@ async function run() {
     });
 
     //get payment history
-    app.get('/payments', async (req, res) => {
+    app.get('/payments', verifyFBToken, async (req, res) => {
       try {
         const payments = await parcelDB.collection('payments')
           .find()
@@ -202,7 +291,7 @@ async function run() {
     });
 
     //get payment history fro a particular user
-    app.get('/payments-history', async (req, res) => {
+    app.get('/payments-history', verifyFBToken, async (req, res) => {
       try {
         const email = req.query.email;
         const query = email ? { email } : {};
@@ -215,6 +304,195 @@ async function run() {
         res.status(500).send({ error: 'Failed to fetch payment history', message: error.message });
       }
     });
+
+
+
+    const ridersCollection = parcelDB.collection("riders");
+
+    // POST /riders - Apply as a rider
+    app.post("/riders", async (req, res) => {
+      try {
+        const rider = req.body;
+        console.log(rider)
+        // Ensure email is unique (1 application per user)
+        const existing = await ridersCollection.findOne({ email: rider.email });
+        if (existing) {
+          return res.status(409).send({ message: "Rider already applied" });
+        }
+
+        // Set default fields
+        rider.status = "pending";
+        rider.applied_at = new Date();
+
+        const result = await ridersCollection.insertOne(rider);
+        res.status(201).send({ insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Failed to apply rider:", error);
+        res.status(500).send({ error: "Failed to apply", message: error.message });
+      }
+    });
+
+
+    // GET /riders/pending
+    app.get('/riders/pending', async (req, res) => {
+      try {
+        const pendingRiders = await ridersCollection.find({ status: 'pending' }).toArray();
+        res.json(pendingRiders);
+      } catch (error) {
+        console.error("Failed to get pending riders:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    //updae status 
+
+    app.patch('/riders/update-status/:id', async (req, res) => {
+      const riderId = req.params.id;
+      const { status, email } = req.body;
+
+      const allowedStatuses = ['accepted', 'rejected', 'active', 'deactivated'];
+
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+
+      try {
+        const result = await ridersCollection.updateOne(
+          { _id: new ObjectId(riderId) },
+          { $set: { status } }
+        );
+
+        //updaqte user role for accepting rider
+        if (status === 'active') {
+          const userQuery = { email };
+          const userUpdatedDoc = {
+            $set: {
+              role: 'rider'
+            }
+          }
+          const roleResult = await userCollection.updateOne(userQuery, userUpdatedDoc)
+        }
+
+
+
+
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({ error: 'Rider not found or status unchanged' });
+        }
+
+        res.json({ message: `Rider status updated to ${status}` });
+      } catch (error) {
+        console.error('Failed to update rider status:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+
+    //GEt active Riders
+    app.get('/riders/active', async (req, res) => {
+      const search = req.query.search || '';
+      const query = {
+        status: { $in: ['accepted', 'active'] },
+        name: { $regex: search, $options: 'i' },
+      };
+
+      try {
+        const activeRiders = await ridersCollection.find(query).toArray();
+        res.send(activeRiders);
+      } catch (error) {
+        res.status(500).send({ message: 'Error fetching riders' });
+      }
+    });
+
+
+
+    //serach user by email to take admin action
+    app.get('/users/search', async (req, res) => {
+      const email = req.query.email;
+
+      if (!email) {
+        return res.status(400).send({ message: 'Email query is required' });
+      }
+
+      try {
+        const users = await userCollection
+          .find({ email: { $regex: email, $options: 'i' } }) // case-insensitive partial match
+          .limit(10)
+          .project({ email: 1, role: 1, created_at: 1, _id: 0 }) // only required fields
+          .toArray();
+
+        if (!users.length) {
+          return res.status(404).send({ message: 'No users found' });
+        }
+
+        res.send(users);
+      } catch (error) {
+        console.error('Search error:', error);
+        res.status(500).send({ message: 'Internal server error' });
+      }
+    });
+
+    //update role foradmin
+    app.patch('/users/role/:email', async (req, res) => {
+      const email = req.params.email;
+      const { role } = req.body;
+
+      if (!['admin', 'user', 'rider'].includes(role)) {
+        return res.status(400).send({ message: 'Invalid role' });
+      }
+
+      try {
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ message: 'User not found' });
+        }
+
+        let updateDoc = {};
+
+        if (role === 'admin') {
+          // If current role is NOT admin, store it before promoting
+          updateDoc = {
+            $set: { role: 'admin' },
+            ...(user.role !== 'admin' && user.role
+              ? { $set: { role: 'admin', previous_role: user.role } }
+              : {}),
+          };
+        } else {
+          // Revert to previous_role if it exists
+          const newRole = user.previous_role || 'user';
+
+          updateDoc = {
+            $set: { role: newRole },
+            $unset: { previous_role: "" },
+          };
+        }
+
+        const result = await userCollection.updateOne(
+          { email },
+          updateDoc
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(400).send({ message: 'Role not changed' });
+        }
+
+        res.send({ message: `User role updated to ${updateDoc.$set.role}` });
+      } catch (error) {
+        console.error('Role update error:', error);
+        res.status(500).send({ message: 'Internal server error' });
+      }
+    });
+
+
+
+
+
+
+
+
+
     // Test route
     app.get('/', (req, res) => {
       res.send('Parcel Management Server is running');
