@@ -46,10 +46,12 @@ async function run() {
     const parcelCollection = parcelDB.collection("parcels");
 
 
+
+
+
     // Auth middleware
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
-      console.log('authHeader', authHeader)
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).send({ message: 'Unauthorized Access' });
       }
@@ -64,6 +66,21 @@ async function run() {
         return res.status(403).send({ message: 'Forbidden Access' });
       }
     };
+
+
+    //Admin verification middleware
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      console.log(user, user.role)
+      if (!user || user.role !== 'admin') {
+        return res.status(403).send({ message: 'Forbidden Access' })
+      }
+      next();
+    }
+
+
 
     // POST route to add parcel
     app.post('/parcels', verifyFBToken, async (req, res) => {
@@ -145,21 +162,34 @@ async function run() {
 
 
     //Track a parcel by id
-    const tracklCollection = parcelDB.collection("trackedParcel");
-    app.post("/track", async (req, res) => {
-      const { tracking_id, parcel_id, status, message, updated_by = '' } = req.body;
+    app.get('/track/:tracking_id', verifyFBToken, async (req, res) => {
+      const tracking_id = req.params.tracking_id;
 
-      const log = {
-        tracking_id,
-        parcel_id: parcel_id ? new ObjectId(parcel_id) : undefined,
-        status,
-        message,
-        time: new Date(),
-        updated_by,
-      };
+      try {
+        const parcel = await parcelCollection.findOne({ tracking_id });
 
-      const result = await trackingCollection.insertOne(log);
-      res.send({ success: true, insertedId: result.insertedId });
+        if (!parcel) {
+          return res.status(404).send({ message: 'Parcel not found' });
+        }
+
+        res.send({
+          tracking_id: parcel.tracking_id,
+          title: parcel.title,
+          delivery_status: parcel.delivery_status,
+          assigned_rider: {
+            name: parcel.assigned_rider?.name || null,
+            email: parcel.assigned_rider?.email || null,
+            phone: parcel.assigned_rider?.phone || null
+          },
+          receiver_address: parcel.receiver_address || null,
+          creation_date: parcel.creation_date,
+          weight: parcel.weight,
+          created_by: parcel.created_by,
+        });
+      } catch (error) {
+        console.error('Error in tracking parcel:', error);
+        res.status(500).send({ message: 'Failed to fetch tracking info' });
+      }
     });
 
 
@@ -310,7 +340,7 @@ async function run() {
     const ridersCollection = parcelDB.collection("riders");
 
     // POST /riders - Apply as a rider
-    app.post("/riders", async (req, res) => {
+    app.post("/riders", verifyFBToken, async (req, res) => {
       try {
         const rider = req.body;
         console.log(rider)
@@ -334,7 +364,7 @@ async function run() {
 
 
     // GET /riders/pending
-    app.get('/riders/pending', async (req, res) => {
+    app.get('/riders/pending', verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const pendingRiders = await ridersCollection.find({ status: 'pending' }).toArray();
         res.json(pendingRiders);
@@ -344,9 +374,9 @@ async function run() {
       }
     });
 
-    //updae status 
+    //update status 
 
-    app.patch('/riders/update-status/:id', async (req, res) => {
+    app.patch('/riders/update-status/:id', verifyFBToken, verifyAdmin, async (req, res) => {
       const riderId = req.params.id;
       const { status, email } = req.body;
 
@@ -373,10 +403,6 @@ async function run() {
           const roleResult = await userCollection.updateOne(userQuery, userUpdatedDoc)
         }
 
-
-
-
-
         if (result.modifiedCount === 0) {
           return res.status(404).json({ error: 'Rider not found or status unchanged' });
         }
@@ -389,8 +415,10 @@ async function run() {
     });
 
 
+
+
     //GEt active Riders
-    app.get('/riders/active', async (req, res) => {
+    app.get('/riders/active', verifyFBToken, verifyAdmin, async (req, res) => {
       const search = req.query.search || '';
       const query = {
         status: { $in: ['accepted', 'active'] },
@@ -408,7 +436,7 @@ async function run() {
 
 
     //serach user by email to take admin action
-    app.get('/users/search', async (req, res) => {
+    app.get('/users/search', verifyFBToken, verifyAdmin, async (req, res) => {
       const email = req.query.email;
 
       if (!email) {
@@ -433,8 +461,8 @@ async function run() {
       }
     });
 
-    //update role foradmin
-    app.patch('/users/role/:email', async (req, res) => {
+    //update role for admin
+    app.patch('/users/role/:email', verifyFBToken, verifyAdmin, async (req, res) => {
       const email = req.params.email;
       const { role } = req.body;
 
@@ -491,6 +519,37 @@ async function run() {
 
 
 
+
+    // GET /users/:email/role
+    app.get('/users/:email/role', verifyFBToken, async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      res.json({ role: user.role || 'user' });
+    });
+
+
+
+
+    // Update parcel to assign rider
+    app.patch('/parcels/:id/assign-rider', verifyFBToken, verifyAdmin, async (req, res) => {
+      const { id } = req.params;
+      const { riderEmail, riderName, riderPhone } = req.body;
+
+      const updateDoc = {
+        $set: {
+          delivery_status: 'assigned',
+          assigned_rider: {
+            email: riderEmail,
+            name: riderName,
+            phone: riderPhone || ''
+          }
+        }
+      };
+
+      const result = await parcelCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+      res.send(result);
+    });
 
 
     // Test route
