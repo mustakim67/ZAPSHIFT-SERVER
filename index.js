@@ -18,7 +18,7 @@ app.use(cors());
 app.use(express.json());
 
 //firebase sdk
-const serviceAccount = require("./serviceAccountKey.json");
+const serviceAccount = require(process.env.SERVICE_ACCOUNT_PATH);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
